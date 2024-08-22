@@ -25,11 +25,8 @@ public protocol AIRequest {
 public extension AIRequest {
 	var method: HTTPMethod { return .GET }
 	var contentType: HTTPContentType { return .json }
-
 	var headerParams: HTTPHeaders? { return nil }
-	
 	var bodyParams: Params?  { return nil }
-	
 	var multipartData: [MultipartFormData]?  { return nil }
 	
 	// 병합된 최종 헤더
@@ -119,7 +116,7 @@ public struct MultipartFormData {
 	}
 }
 
-// MARK: - AIConnectKit
+// MARK: - AINet
 
 @available(iOS 15.0, *)
 public struct AINet {
@@ -140,11 +137,15 @@ public struct AINet {
 		logger.logRequest(urlRequest)
 		logger.logCurlCommand(urlRequest)
 
-		let (data, response) = try await URLSession.shared.data(for: urlRequest)
-
-		logger.logResponse(response, data: data)
-
-		return try processResponse(data: data, response: response, decoder: JSONDecoder())
+		do {
+			let (data, response) = try await URLSession.shared.data(for: urlRequest)
+			logger.logResponse(response, data: data)
+			return try processResponse(data: data, response: response, decoder: JSONDecoder())
+		} catch let error as URLError {
+			throw NetworkRequestError.urlSessionError(error)
+		} catch {
+			throw NetworkRequestError.unknownError
+		}
 	}
 
 	// URLRequest 준비
@@ -181,27 +182,60 @@ public struct AINet {
 	}
 
 	// 응답 처리
-	private func processResponse<ReturnType: Codable>(data: Data, response: URLResponse, decoder: JSONDecoder) throws -> ReturnType {
-		guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-			throw NetworkRequestError.serverError(data)
+	private func processResponse<ReturnType: Codable>(data: Data?, response: URLResponse?, decoder: JSONDecoder) throws -> ReturnType {
+		guard let httpResponse = response as? HTTPURLResponse else {
+			throw NetworkRequestError.unknownError
 		}
 
-		return try decoder.decode(ReturnType.self, from: data)
+		switch httpResponse.statusCode {
+		case 200...299:
+			guard let data = data else {
+				throw NetworkRequestError.noData
+			}
+			do {
+				return try decoder.decode(ReturnType.self, from: data)
+			} catch {
+				throw NetworkRequestError.decodingError(error)
+			}
+
+		case 400...499:
+			throw NetworkRequestError.clientError(statusCode: httpResponse.statusCode, data: data)
+
+		case 500...599:
+			throw NetworkRequestError.serverError(statusCode: httpResponse.statusCode, data: data)
+
+		default:
+			throw NetworkRequestError.unknownError
+		}
 	}
 }
-
 // MARK: - NetworkRequestError
 
 public enum NetworkRequestError: LocalizedError {
 	case invalidRequest
-	case serverError(Data?)
+	case clientError(statusCode: Int, data: Data?)
+	case serverError(statusCode: Int, data: Data?)
+	case noData
+	case decodingError(Error)
+	case urlSessionError(URLError)
+	case unknownError
 
 	public var errorDescription: String? {
 		switch self {
 		case .invalidRequest:
 			return "Invalid request."
-		case .serverError(let data):
-			return "Server error. Data: \(data?.description ?? "None")"
+		case .clientError(let statusCode, _):
+			return "Client error: \(statusCode)"
+		case .serverError(let statusCode, _):
+			return "Server error: \(statusCode)"
+		case .noData:
+			return "No data received."
+		case .decodingError(let error):
+			return "Decoding error: \(error.localizedDescription)"
+		case .urlSessionError(let error):
+			return "Network error: \(error.localizedDescription)"
+		case .unknownError:
+			return "An unknown error occurred."
 		}
 	}
 }
